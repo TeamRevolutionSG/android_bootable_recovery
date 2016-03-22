@@ -297,6 +297,7 @@ Value* FormatFn(const char* name, State* state, int argc, Expr* argv[]) {
     char* location;
     char* fs_size;
     char* mount_point;
+    char *detected_fs_type;
 
     if (ReadArgs(state, argv, 5, &fs_type, &partition_type, &location, &fs_size, &mount_point) < 0) {
         return NULL;
@@ -348,43 +349,53 @@ Value* FormatFn(const char* name, State* state, int argc, Expr* argv[]) {
             goto done;
         }
         result = location;
-#ifdef USE_EXT4
-    } else if (strcmp(fs_type, "ext4") == 0) {
-        int status = make_ext4fs(location, atoll(fs_size), mount_point, sehandle);
-        if (status != 0) {
-            printf("%s: make_ext4fs failed (%d) on %s",
-                    name, status, location);
-            result = strdup("");
-            goto done;
-        }
-        result = location;
-    } else if (strcmp(fs_type, "f2fs") == 0) {
-        char *num_sectors;
-        char bytes_reserved[10] = {0};
-        if (asprintf(&num_sectors, "%lld", atoll(fs_size) / 512) <= 0) {
-            printf("format_volume: failed to create %s command for %s\n", fs_type, location);
-            result = strdup("");
-            goto done;
-        }
-        if (atoll(num_sectors) <=0) {
-            snprintf(bytes_reserved, sizeof(bytes_reserved), "%lld", -atoll(fs_size));
-        }
-        const char *f2fs_path = "/sbin/mkfs.f2fs";
-        const char* const f2fs_argv[] = {"mkfs.f2fs", "-t", "-d1", "-r", bytes_reserved,
-                location, NULL};
-        int status = exec_cmd(f2fs_path, (char* const*)f2fs_argv);
-        free(num_sectors);
-        if (status != 0) {
-            printf("%s: mkfs.f2fs failed (%d) on %s",
-                    name, status, location);
-            result = strdup("");
-            goto done;
-        }
-        result = location;
-#endif
     } else {
-        printf("%s: unsupported fs_type \"%s\" partition_type \"%s\"",
-                name, fs_type, partition_type);
+        detected_fs_type = blkid_get_tag_value(NULL, "TYPE", location);
+        if (detected_fs_type) {
+            uiPrintf(state, "formating %s with detected filesystem %s\n",
+                    mount_point, detected_fs_type);
+            fs_type = detected_fs_type;
+        } else {
+            uiPrintf(state, "could not detect filesystem for %s, assuming %s\n",
+                    location, fs_type);
+        }
+
+        if (strcmp(fs_type, "ext4") == 0) {
+            int status = make_ext4fs(location, atoll(fs_size), mount_point, sehandle);
+            if (status != 0) {
+                printf("%s: make_ext4fs failed (%d) on %s",
+                        name, status, location);
+                result = strdup("");
+                goto done;
+            }
+            result = location;
+        } else if (strcmp(fs_type, "f2fs") == 0) {
+            char *num_sectors;
+            char bytes_reserved[10] = {0};
+            if (asprintf(&num_sectors, "%lld", atoll(fs_size) / 512) <= 0) {
+                printf("format_volume: failed to create %s command for %s\n", fs_type, location);
+                result = strdup("");
+                goto done;
+            }
+            if (atoll(num_sectors) <=0) {
+                snprintf(bytes_reserved, sizeof(bytes_reserved), "%lld", -atoll(fs_size));
+            }
+            const char *f2fs_path = "/sbin/mkfs.f2fs";
+            const char* const f2fs_argv[] = {"mkfs.f2fs", "-t", "-d1", "-r", bytes_reserved,
+                    location, NULL};
+            int status = exec_cmd(f2fs_path, (char* const*)f2fs_argv);
+            free(num_sectors);
+            if (status != 0) {
+                printf("%s: mkfs.f2fs failed (%d) on %s",
+                        name, status, location);
+                result = strdup("");
+                goto done;
+            }
+            result = location;
+        } else {
+            printf("%s: unsupported fs_type \"%s\" partition_type \"%s\"",
+                    name, fs_type, partition_type);
+        }
     }
 
 done:
@@ -798,6 +809,14 @@ static int ApplyParsedPerms(
     int bad = 0;
 
     if (parsed.has_selabel) {
+        /*
+         * Using GCC 5.1 with install.c causes segfault with
+         * 'lsetfilecon(filename, parsed.selabel)' for an unknown reason.
+         * Maybe a GCC bug, or we're using a wrong pointer.
+         * Workaround by assigning &parsed.selabel to an unused char variable
+         * until we can find a cleaner solution.
+         */
+        char unusedptrselabel = &parsed.selabel;
         if (lsetfilecon(filename, parsed.selabel) != 0) {
             uiPrintf(state, "ApplyParsedPerms: lsetfilecon of %s to %s failed: %s\n",
                     filename, parsed.selabel, strerror(errno));
